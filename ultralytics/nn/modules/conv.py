@@ -682,46 +682,109 @@ class Concat(nn.Module):
         """
         return torch.cat(x, self.d)
 
+# class ConcatHead(nn.Module):
+#     def __init__(self, *args, ch=()):
+#         super().__init__()
+#         # Only keep integers (class counts), skip list or other types like ch
+#         self.nc_list = [a for a in args if isinstance(a, int)]
+
+#     def forward(self, x):
+#         # Detect heads can return (pred, features) or just pred
+#         if isinstance(x[0], tuple):
+#             preds = [h[0] for h in x]
+#             features = x[0][1]  # only needed for exports
+#         else:
+#             preds = x
+
+#         # Merge predictions
+#         merged = []
+#         class_offset = 0
+#         total_nc = sum(self.nc_list)
+
+#         for i, p in enumerate(preds):
+#             b, c, n = p.shape
+#             nc = self.nc_list[i]
+#             box = p[:, :4, :]                     # [B, 4, N]
+#             cls = p[:, 4:, :]                     # [B, nc, N]
+
+#             # Pad class channels to global class layout
+#             pad_left = class_offset
+#             pad_right = total_nc - nc - pad_left
+#             cls_padded = torch.nn.functional.pad(cls, (0, 0, pad_left, pad_right), value=0)
+
+#             merged.append(torch.cat([box, cls_padded], dim=1))  # [B, 4+total_nc, N]
+#             class_offset += nc
+
+#         # Final output is merged across all predictions (N)
+#         final = torch.cat(merged, dim=2)  # [B, 4+total_nc, N_total]
+
+#         if isinstance(x[0], tuple):
+#             return final, features
+#         else:
+#             return final
+
 class ConcatHead(nn.Module):
+    """Concatenaion layer for Detect heads."""
+
     def __init__(self, *args, ch=()):
+        """Initializes the ConcatHead."""
         super().__init__()
-        # Only keep integers (class counts), skip list or other types like ch
-        self.nc_list = [a for a in args if isinstance(a, int)]
+        nc_list = [a for a in args if isinstance(a, int)]
+        self.nc1 = nc_list[0]
+        self.nc2 = nc_list[1]  # number of classes of head 1
 
     def forward(self, x):
-        # Detect heads can return (pred, features) or just pred
-        if isinstance(x[0], tuple):
-            preds = [h[0] for h in x]
-            features = x[0][1]  # only needed for exports
-        else:
-            preds = x
+        """Concatenates and returns predicted bounding boxes and class probabilities."""
 
-        # Merge predictions
-        merged = []
-        class_offset = 0
-        total_nc = sum(self.nc_list)
-
-        for i, p in enumerate(preds):
-            b, c, n = p.shape
-            nc = self.nc_list[i]
-            box = p[:, :4, :]                     # [B, 4, N]
-            cls = p[:, 4:, :]                     # [B, nc, N]
-
-            # Pad class channels to global class layout
-            pad_left = class_offset
-            pad_right = total_nc - nc - pad_left
-            cls_padded = torch.nn.functional.pad(cls, (0, 0, pad_left, pad_right), value=0)
-
-            merged.append(torch.cat([box, cls_padded], dim=1))  # [B, 4+total_nc, N]
-            class_offset += nc
-
-        # Final output is merged across all predictions (N)
-        final = torch.cat(merged, dim=2)  # [B, 4+total_nc, N_total]
+        # x is a list of length 2
+        # Each element is either a tuple or just the decoded features
+        # depending whether it's being exported.
+        # First element of tuple are the decoded preds,
+        # second element are feature maps for heatmap visualization
 
         if isinstance(x[0], tuple):
-            return final, features
+            preds1 = x[0][0]
+            preds2 = x[1][0]
+        elif isinstance(x[0], list): # when returned raw outputs
+            # The shape is used for stride creation in tasks.py.
+            # Feature maps will have to be decoded individually if used as they can't be merged.
+            return [torch.cat((x0, x1), dim=1) for x0, x1 in zip(x[0], x[1])]
         else:
-            return final
+            preds1 = x[0]
+            preds2 = x[1]
+
+        # Concatenate the new head outputs as extra outputs
+
+        # 1. Concatenate bbox outputs
+        # Shape changes from [N, 4, 6300] to [N, 4, 12600]
+        preds = torch.cat((preds1[:, :4, :], preds2[:, :4, :]), dim=2)
+
+        # 2. Concatenate class outputs
+        # Append preds 1 with empty outputs of size 6300
+        shape = list(preds1.shape)
+        shape[-1] = preds1.shape[-1] + preds2.shape[-1]
+
+        preds1_extended = torch.zeros(shape, device=preds1.device,
+                                      dtype=preds1.dtype)
+        preds1_extended[..., : preds1.shape[-1]] = preds1
+
+        # Prepend preds 2 with empty outputs of size 6300
+        shape = list(preds2.shape)
+        shape[-1] = preds1.shape[-1] + preds2.shape[-1]
+
+        preds2_extended = torch.zeros(shape, device=preds2.device,
+                                      dtype=preds2.dtype)
+        preds2_extended[..., preds2.shape[-1] :] = preds2
+
+        # Arrange the class probabilities in order preds1, preds2. The
+        # class indices of preds2 will therefore start after preds1
+        preds = torch.cat((preds, preds1_extended[:, 4:, :]), dim=1)
+        preds = torch.cat((preds, preds2_extended[:, 4:, :]), dim=1)
+
+        if isinstance(x[0], tuple):
+            return (preds, x[0][1])
+        else:
+            return preds
 
 class Index(nn.Module):
     """
