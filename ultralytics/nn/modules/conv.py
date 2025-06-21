@@ -726,11 +726,15 @@ class Concat(nn.Module):
 class ConcatHead(nn.Module):
     """Concatenaion layer for Detect heads."""
 
-    def __init__(self, nc1=80, nc2=1, ch=()):
+    def __init__(self, nc1=1, nc2=1, ch=()):
         """Initializes the ConcatHead."""
         super().__init__()
         self.nc1 = nc1  # number of classes of head 1
         self.nc2 = nc2  # number of classes of head 2
+        
+        self.nc = self.nc1 + self.nc2  # total number of classes
+        self.stride = [8, 16, 32]
+        self.reg_max = 16
 
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
