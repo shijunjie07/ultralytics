@@ -685,6 +685,8 @@ class Concat(nn.Module):
 class ConcatHead(nn.Module):
     def __init__(self, *nc_list, ch=()):
         super().__init__()
+        print(nc_list)
+        print(ch)
         self.nc_list = list(nc_list)
 
     def forward(self, x):
