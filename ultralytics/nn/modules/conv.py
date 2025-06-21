@@ -726,12 +726,11 @@ class Concat(nn.Module):
 class ConcatHead(nn.Module):
     """Concatenaion layer for Detect heads."""
 
-    def __init__(self, *args, ch=()):
+    def __init__(self, nc1=80, nc2=1, ch=()):
         """Initializes the ConcatHead."""
         super().__init__()
-        nc_list = [a for a in args if isinstance(a, int)]
-        self.nc1 = nc_list[0]
-        self.nc2 = nc_list[1]  # number of classes of head 1
+        self.nc1 = nc1  # number of classes of head 1
+        self.nc2 = nc2  # number of classes of head 2
 
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
@@ -748,7 +747,7 @@ class ConcatHead(nn.Module):
         elif isinstance(x[0], list): # when returned raw outputs
             # The shape is used for stride creation in tasks.py.
             # Feature maps will have to be decoded individually if used as they can't be merged.
-            return [torch.cat((x0, x1), dim=0) for x0, x1 in zip(x[0], x[1])]
+            return [torch.cat((x0, x1), dim=1) for x0, x1 in zip(x[0], x[1])]
         else:
             preds1 = x[0]
             preds2 = x[1]
