@@ -748,7 +748,7 @@ class ConcatHead(nn.Module):
         elif isinstance(x[0], list): # when returned raw outputs
             # The shape is used for stride creation in tasks.py.
             # Feature maps will have to be decoded individually if used as they can't be merged.
-            return [torch.cat((x0, x1), dim=1) for x0, x1 in zip(x[0], x[1])]
+            return [torch.cat((x0, x1), dim=0) for x0, x1 in zip(x[0], x[1])]
         else:
             preds1 = x[0]
             preds2 = x[1]
