@@ -683,9 +683,9 @@ class Concat(nn.Module):
         return torch.cat(x, self.d)
 
 class ConcatHead(nn.Module):
-    def __init__(self, nc_list):  # e.g., [1, 1]
+    def __init__(self, *nc_list, ch=()):
         super().__init__()
-        self.nc_list = nc_list
+        self.nc_list = list(nc_list)
 
     def forward(self, x):
         # Detect heads can return (pred, features) or just pred
