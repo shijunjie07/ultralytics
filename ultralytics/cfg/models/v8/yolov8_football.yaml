@@ -1,10 +1,10 @@
-# yolov8_twohead.yaml ─ YOLOv8 with separate heads for Player & Ball
+# yolov8_football.yaml ─ YOLOv8 with separate heads for Ball & Player
 # Ultralytics 🚀 AGPL‑3.0
 
 # 1. Global params
-nc: 2           # TOTAL classes (ball=0, player=1)  ← changed
+nc: 2           # TOTAL classes (ball=0, player=1)
 names: [ball, player]  # class names
-scales: # model compound scaling constants, i.e. 'model=yolov8n_football.yaml' will call yolov8.yaml with scale 'n'
+scales:
   # [depth, width, max_channels]
   n: [0.33, 0.25, 1024] # YOLOv8n summary: 129 layers, 3157200 parameters, 3157184 gradients, 8.9 GFLOPS
   s: [0.33, 0.50, 1024] # YOLOv8s summary: 129 layers, 11166560 parameters, 11166544 gradients, 28.8 GFLOPS
