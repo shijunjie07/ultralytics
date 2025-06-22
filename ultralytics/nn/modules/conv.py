@@ -333,74 +333,206 @@ class Concat(nn.Module):
         return torch.cat(x, self.d)
 
 
+# class ConcatHead(nn.Module):
+#     """Concatenaion layer for Detect heads."""
+
+#     # def __init__(self, nc1=80, nc2=1, ch=()):
+#     #     """Initializes the ConcatHead."""
+#     #     super().__init__()
+#     #     self.nc1 = nc1  # number of classes of head 1
+#     #     self.nc2 = nc2  # number of classes of head 2
+
+#     def __init__(self, nc1=1, nc2=1, ch=(), strides=(8, 16, 32), reg_max=16):
+#         super().__init__()
+#         self.nc1 = nc1
+#         self.nc2 = nc2
+#         self.nc  = nc1 + nc2
+
+#         # >>> attributes the loss expects
+#         self.stride  = torch.tensor(strides)
+#         self.reg_max = reg_max
+        
+#     def forward(self, x):
+#         """Concatenates and returns predicted bounding boxes and class probabilities."""
+
+#         # x is a list of length 2
+#         # Each element is either a tuple or just the decoded features
+#         # depending whether it's being exported.
+#         # First element of tuple are the decoded preds,
+#         # second element are feature maps for heatmap visualization
+
+#         if isinstance(x[0], tuple):
+#             preds1 = x[0][0]
+#             preds2 = x[1][0]
+#         elif isinstance(x[0], list): # when returned raw outputs
+#             # The shape is used for stride creation in tasks.py.
+#             # Feature maps will have to be decoded individually if used as they can't be merged.
+#             return [torch.cat((x0, x1), dim=1) for x0, x1 in zip(x[0], x[1])]
+#         else:
+#             preds1 = x[0]
+#             preds2 = x[1]
+
+#         # Concatenate the new head outputs as extra outputs
+
+#         # 1. Concatenate bbox outputs
+#         # Shape changes from [N, 4, 6300] to [N, 4, 12600]
+#         preds = torch.cat((preds1[:, :4, :], preds2[:, :4, :]), dim=2)
+
+#         # 2. Concatenate class outputs
+#         # Append preds 1 with empty outputs of size 6300
+#         shape = list(preds1.shape)
+#         shape[-1] = preds1.shape[-1] + preds2.shape[-1]
+
+#         preds1_extended = torch.zeros(shape, device=preds1.device,
+#                                       dtype=preds1.dtype)
+#         preds1_extended[..., : preds1.shape[-1]] = preds1
+
+#         # Prepend preds 2 with empty outputs of size 6300
+#         shape = list(preds2.shape)
+#         shape[-1] = preds1.shape[-1] + preds2.shape[-1]
+
+#         preds2_extended = torch.zeros(shape, device=preds2.device,
+#                                       dtype=preds2.dtype)
+#         preds2_extended[..., preds2.shape[-1] :] = preds2
+
+#         # Arrange the class probabilities in order preds1, preds2. The
+#         # class indices of preds2 will therefore start after preds1
+#         preds = torch.cat((preds, preds1_extended[:, 4:, :]), dim=1)
+#         preds = torch.cat((preds, preds2_extended[:, 4:, :]), dim=1)
+
+#         if isinstance(x[0], tuple):
+#             return (preds, x[0][1])
+#         else:
+#             return preds
+
+
 class ConcatHead(nn.Module):
-    """Concatenaion layer for Detect heads."""
+    """Merge two Detect heads into a single head that plays nicely with
+    Ultralytics v8DetectionLoss.
 
-    # def __init__(self, nc1=80, nc2=1, ch=()):
-    #     """Initializes the ConcatHead."""
-    #     super().__init__()
-    #     self.nc1 = nc1  # number of classes of head 1
-    #     self.nc2 = nc2  # number of classes of head 2
+    It supports three execution modes automatically:
+    1. **Training** – receives raw feature‑map lists (each list has three
+       feature maps: P3, P4, P5).  We concatenate **along the detection
+       vector dimension**, so the per‑anchor channel count remains
+       reg_max*4 + (nc1 + nc2), which matches the loss‑function expectation.
+    2. **Export / ONNX** – receives two tuples ``(preds, feat)``. We merge
+       the predictions as in (3) but keep the first tuple's feature maps so
+       the exporter can still trace them.
+    3. **Inference** – receives two already‑decoded prediction tensors.
 
-    def __init__(self, nc1=1, nc2=1, ch=(), strides=(8, 16, 32), reg_max=16):
+    Parameters
+    ----------
+    nc1, nc2 : int
+        Number of classes for head‑1 and head‑2, respectively.
+    reg_max : int, default 16
+        Discrete Location (DFL) bins per box side (YOLOv8 default).
+    strides : tuple, default (8, 16, 32)
+        Strides associated with the model – exposed because the Ultralytics
+        loss grabs them from the last layer (which is this layer).
+    """
+
+    def __init__(self,
+                 nc1: int = 1,
+                 nc2: int = 1,
+                 ch=(),
+                 reg_max: int = 16,
+                 strides=(8, 16, 32)):
         super().__init__()
         self.nc1 = nc1
         self.nc2 = nc2
-        self.nc  = nc1 + nc2
-
-        # >>> attributes the loss expects
-        self.stride  = torch.tensor(strides)
+        self.nc = nc1 + nc2
         self.reg_max = reg_max
-        
+
+        # Attributes the Ultralytics loss expects -------------------------
+        self.stride = torch.tensor(strides)   # gets copied to model.stride
+        self.no = self.reg_max * 4 + self.nc  # channels per anchor
+
+    # ------------------------------------------------------------------ #
+    # Helper functions
+    # ------------------------------------------------------------------ #
+    @property
+    def reg_dim(self):
+        """Number of bbox-distribution channels per anchor."""
+        return self.reg_max * 4
+
+    # ----------------------- feature‑map branch ------------------------- #
+    def _merge_feature_maps(self, maps1, maps2):
+        """Merge raw Detect feature maps (training path).
+
+        Each element in maps1 / maps2 is shaped [B, C, H, W] with
+        C = anchors * (reg_dim + nc_i).  We reshape so the detection
+        vector is dimension-2, stack along that dimension, and reshape back
+        to [B, anchors * (reg_dim + nc), H, W].
+        """
+        merged_levels = []
+        for f1, f2 in zip(maps1, maps2):
+            b, c1, h, w = f1.shape
+            _, c2, _, _ = f2.shape
+            vec1 = self.reg_dim + self.nc1
+            vec2 = self.reg_dim + self.nc2
+            a1 = c1 // vec1
+            a2 = c2 // vec2
+            assert a1 == a2, "Anchor mismatch between heads"
+            anchors = a1
+
+            # reshape so detection vector is dim‑2
+            f1 = f1.view(b, anchors, vec1, h, w)
+            f2 = f2.view(b, anchors, vec2, h, w)
+
+            # concatenate corresponding parts
+            reg = torch.cat([f1[:, :, : self.reg_dim],
+                             f2[:, :, : self.reg_dim]], dim=2)
+            cls = torch.cat([f1[:, :, self.reg_dim :],
+                             f2[:, :, self.reg_dim :]], dim=2)
+
+            merged = torch.cat([reg, cls], dim=2).view(b, anchors * self.no, h, w)
+            merged_levels.append(merged)
+        return merged_levels
+
+    # ----------------------- prediction branch ------------------------- #
+    def _merge_preds_aligned(self, p1, p2):
+        """Merge two prediction tensors into one with no chans per anchor.
+        Shape convention: [B, reg_dim + nc_i, N_i].
+        """
+        b, _, n1 = p1.shape
+        _, _, n2 = p2.shape
+        device, dtype = p1.device, p1.dtype
+
+        # 1) BBox distributions (first reg_dim channels)
+        boxes = torch.cat([p1[:, : self.reg_dim, :],
+                           p2[:, : self.reg_dim, :]], dim=2)
+
+        # 2) Class logits – build zero tensor then fill slices
+        cls = torch.zeros((b, self.nc, n1 + n2), device=device, dtype=dtype)
+        cls[:, : self.nc1, : n1] = p1[:, self.reg_dim :, :]
+        cls[:, self.nc1 :, n1 :] = p2[:, self.reg_dim :, :]
+
+        return torch.cat([boxes, cls], dim=1)
+
+    # ------------------------------------------------------------------ #
+    # Forward
+    # ------------------------------------------------------------------ #
     def forward(self, x):
-        """Concatenates and returns predicted bounding boxes and class probabilities."""
+        """Forward pass.
 
-        # x is a list of length 2
-        # Each element is either a tuple or just the decoded features
-        # depending whether it's being exported.
-        # First element of tuple are the decoded preds,
-        # second element are feature maps for heatmap visualization
+        Parameters
+        ----------
+        x : list
+            [out1, out2] where each out can be:
+               • list  raw feature maps (training)
+               • tuple (preds, feat)`` (export path)
+               • tensor decoded/encoded preds (inference)
+        """
+        x1, x2 = x  # unpack
 
-        if isinstance(x[0], tuple):
-            preds1 = x[0][0]
-            preds2 = x[1][0]
-        elif isinstance(x[0], list): # when returned raw outputs
-            # The shape is used for stride creation in tasks.py.
-            # Feature maps will have to be decoded individually if used as they can't be merged.
-            return [torch.cat((x0, x1), dim=1) for x0, x1 in zip(x[0], x[1])]
-        else:
-            preds1 = x[0]
-            preds2 = x[1]
+        # Case 1 – Training: raw FPN feature maps ----------------------- #
+        if isinstance(x1, list):
+            return self._merge_feature_maps(x1, x2)
 
-        # Concatenate the new head outputs as extra outputs
+        # Case 2 – Export: tuple(preds, feature_map) -------------------- #
+        if isinstance(x1, tuple):
+            preds = self._merge_preds_aligned(x1[0], x2[0])
+            return preds, x1[1]  # keep first head's feature maps for heatmap
 
-        # 1. Concatenate bbox outputs
-        # Shape changes from [N, 4, 6300] to [N, 4, 12600]
-        preds = torch.cat((preds1[:, :4, :], preds2[:, :4, :]), dim=2)
-
-        # 2. Concatenate class outputs
-        # Append preds 1 with empty outputs of size 6300
-        shape = list(preds1.shape)
-        shape[-1] = preds1.shape[-1] + preds2.shape[-1]
-
-        preds1_extended = torch.zeros(shape, device=preds1.device,
-                                      dtype=preds1.dtype)
-        preds1_extended[..., : preds1.shape[-1]] = preds1
-
-        # Prepend preds 2 with empty outputs of size 6300
-        shape = list(preds2.shape)
-        shape[-1] = preds1.shape[-1] + preds2.shape[-1]
-
-        preds2_extended = torch.zeros(shape, device=preds2.device,
-                                      dtype=preds2.dtype)
-        preds2_extended[..., preds2.shape[-1] :] = preds2
-
-        # Arrange the class probabilities in order preds1, preds2. The
-        # class indices of preds2 will therefore start after preds1
-        preds = torch.cat((preds, preds1_extended[:, 4:, :]), dim=1)
-        preds = torch.cat((preds, preds2_extended[:, 4:, :]), dim=1)
-
-        if isinstance(x[0], tuple):
-            return (preds, x[0][1])
-        else:
-            return preds
+        # Case 3 – Standard inference: just tensors -------------------- #
+        return self._merge_preds_aligned(x1, x2)
