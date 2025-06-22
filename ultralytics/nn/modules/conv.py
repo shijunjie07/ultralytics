@@ -405,30 +405,18 @@ class Concat(nn.Module):
 #         else:
 #             return preds
 
-
 class ConcatHead(nn.Module):
-    """Merge two Detect heads into a single head that plays nicely with
-    Ultralytics v8DetectionLoss.
+    """Merge two Detect heads so the combined output keeps **one** set of
+    box‑distribution channels (64) and concatenates the class channels.
 
-    It supports three execution modes automatically:
-    1. **Training** – receives raw feature‑map lists (each list has three
-       feature maps: P3, P4, P5).  We concatenate **along the detection
-       vector dimension**, so the per‑anchor channel count remains
-       reg_max*4 + (nc1 + nc2), which matches the loss‑function expectation.
-    2. **Export / ONNX** – receives two tuples ``(preds, feat)``. We merge
-       the predictions as in (3) but keep the first tuple's feature maps so
-       the exporter can still trace them.
-    3. **Inference** – receives two already‑decoded prediction tensors.
+    This keeps the per‑anchor vector length at ``reg_max*4 + (nc1+nc2)`` so
+    Ultralytics’ standard `v8DetectionLoss` (which hard‑codes that length)
+    works unchanged.
 
-    Parameters
-    ----------
-    nc1, nc2 : int
-        Number of classes for head‑1 and head‑2, respectively.
-    reg_max : int, default 16
-        Discrete Location (DFL) bins per box side (YOLOv8 default).
-    strides : tuple, default (8, 16, 32)
-        Strides associated with the model – exposed because the Ultralytics
-        loss grabs them from the last layer (which is this layer).
+    Three execution paths are supported automatically:
+    * **Training** – receives raw feature‑map lists and merges them.
+    * **Export**   – receives two tuples ``(preds, feat)``; merges preds.
+    * **Inference** – receives two prediction tensors; merges them.
     """
 
     def __init__(self,
@@ -443,31 +431,25 @@ class ConcatHead(nn.Module):
         self.nc = nc1 + nc2
         self.reg_max = reg_max
 
-        # Attributes the Ultralytics loss expects -------------------------
-        self.stride = torch.tensor(strides)   # gets copied to model.stride
-        self.no = self.reg_max * 4 + self.nc  # channels per anchor
+        # Attributes the Ultralytics loss looks for --------------------- #
+        self.stride = torch.tensor(strides)
+        self.no = self.reg_max * 4 + self.nc  # 64 + (nc1+nc2)
 
     # ------------------------------------------------------------------ #
-    # Helper functions
+    # Internal helpers
     # ------------------------------------------------------------------ #
     @property
     def reg_dim(self):
-        """Number of bbox-distribution channels per anchor."""
-        return self.reg_max * 4
+        return self.reg_max * 4  # 64 for YOLOv8
 
-    # ----------------------- feature‑map branch ------------------------- #
+    # ----------------------- feature‑map branch ------------------------ #
     def _merge_feature_maps(self, maps1, maps2):
-        """Merge raw Detect feature maps (training path).
-
-        Each element in maps1 / maps2 is shaped [B, C, H, W] with
-        C = anchors * (reg_dim + nc_i).  We reshape so the detection
-        vector is dimension-2, stack along that dimension, and reshape back
-        to [B, anchors * (reg_dim + nc), H, W].
-        """
         merged_levels = []
         for f1, f2 in zip(maps1, maps2):
             b, c1, h, w = f1.shape
-            _, c2, _, _ = f2.shape
+            b2, c2, _, _ = f2.shape
+            assert b == b2 and h == f2.shape[2] and w == f2.shape[3]
+
             vec1 = self.reg_dim + self.nc1
             vec2 = self.reg_dim + self.nc2
             a1 = c1 // vec1
@@ -475,34 +457,35 @@ class ConcatHead(nn.Module):
             assert a1 == a2, "Anchor mismatch between heads"
             anchors = a1
 
-            # reshape so detection vector is dim‑2
+            # reshape (B, A, vector, H, W)
             f1 = f1.view(b, anchors, vec1, h, w)
             f2 = f2.view(b, anchors, vec2, h, w)
 
-            # concatenate corresponding parts
-            reg = torch.cat([f1[:, :, : self.reg_dim],
-                             f2[:, :, : self.reg_dim]], dim=2)
-            cls = torch.cat([f1[:, :, self.reg_dim :],
-                             f2[:, :, self.reg_dim :]], dim=2)
+            # 1) Box‑distribution – take ONLY from head‑1 to keep 64 chan
+            reg = f1[:, :, : self.reg_dim]
 
-            merged = torch.cat([reg, cls], dim=2).view(b, anchors * self.no, h, w)
+            # 2) Class logits – concat head‑1 then head‑2
+            cls = torch.cat([
+                f1[:, :, self.reg_dim :],
+                f2[:, :, self.reg_dim :]
+            ], dim=2)
+
+            merged = torch.cat([reg, cls], dim=2).view(
+                b, anchors * self.no, h, w
+            )
             merged_levels.append(merged)
         return merged_levels
 
     # ----------------------- prediction branch ------------------------- #
     def _merge_preds_aligned(self, p1, p2):
-        """Merge two prediction tensors into one with no chans per anchor.
-        Shape convention: [B, reg_dim + nc_i, N_i].
-        """
         b, _, n1 = p1.shape
         _, _, n2 = p2.shape
         device, dtype = p1.device, p1.dtype
 
-        # 1) BBox distributions (first reg_dim channels)
-        boxes = torch.cat([p1[:, : self.reg_dim, :],
-                           p2[:, : self.reg_dim, :]], dim=2)
+        # 1) Boxes – only from head‑1
+        boxes = p1[:, : self.reg_dim, :]
 
-        # 2) Class logits – build zero tensor then fill slices
+        # 2) Class logits – zeros tensor then fill slices
         cls = torch.zeros((b, self.nc, n1 + n2), device=device, dtype=dtype)
         cls[:, : self.nc1, : n1] = p1[:, self.reg_dim :, :]
         cls[:, self.nc1 :, n1 :] = p2[:, self.reg_dim :, :]
@@ -513,26 +496,13 @@ class ConcatHead(nn.Module):
     # Forward
     # ------------------------------------------------------------------ #
     def forward(self, x):
-        """Forward pass.
+        x1, x2 = x
 
-        Parameters
-        ----------
-        x : list
-            [out1, out2] where each out can be:
-               • list  raw feature maps (training)
-               • tuple (preds, feat)`` (export path)
-               • tensor decoded/encoded preds (inference)
-        """
-        x1, x2 = x  # unpack
-
-        # Case 1 – Training: raw FPN feature maps ----------------------- #
         if isinstance(x1, list):
             return self._merge_feature_maps(x1, x2)
 
-        # Case 2 – Export: tuple(preds, feature_map) -------------------- #
         if isinstance(x1, tuple):
             preds = self._merge_preds_aligned(x1[0], x2[0])
-            return preds, x1[1]  # keep first head's feature maps for heatmap
+            return preds, x1[1]
 
-        # Case 3 – Standard inference: just tensors -------------------- #
         return self._merge_preds_aligned(x1, x2)
