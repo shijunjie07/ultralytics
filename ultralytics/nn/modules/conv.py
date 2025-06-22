@@ -406,19 +406,20 @@ class Concat(nn.Module):
 #             return preds
 
 class ConcatHead(nn.Module):
-    """Merge two Detect heads so the combined output keeps **one** set of
-    box‑distribution channels (64) and concatenates the class channels.
+    """
+    Merge two Detect heads (head-A, head-B) so the output is 100 % compatible
+    with Ultralytics **v8DetectionLoss**.
 
-    This keeps the per‑anchor vector length at ``reg_max*4 + (nc1+nc2)`` so
-    Ultralytics’ standard `v8DetectionLoss` (which hard‑codes that length)
-    works unchanged.
-
-    Three execution paths are supported automatically:
-    * **Training** – receives raw feature‑map lists and merges them.
-    * **Export**   – receives two tuples ``(preds, feat)``; merges preds.
-    * **Inference** – receives two prediction tensors; merges them.
+    Per-anchor layout after merging
+        64 box-distribution channels  (DFL, shared)
+      +  1 objectness logit
+      + nc1 class logits  (from head-A)
+      + nc2 class logits  (from head-B)
+    ------------------------------------------------------------------------
+        65 + (nc1 + nc2)  ==  self.no
     """
 
+    # --------------------------------------------------------------------- #
     def __init__(self,
                  nc1: int = 1,
                  nc2: int = 1,
@@ -426,83 +427,95 @@ class ConcatHead(nn.Module):
                  reg_max: int = 16,
                  strides=(8, 16, 32)):
         super().__init__()
-        self.nc1 = nc1
-        self.nc2 = nc2
-        self.nc = nc1 + nc2
+        self.nc1 = int(nc1)
+        self.nc2 = int(nc2)
+        self.nc  = self.nc1 + self.nc2                  # total classes
+
         self.reg_max = reg_max
+        self.stride  = torch.tensor(strides)            # used by loss
+        self.no      = reg_max * 4 + 1 + self.nc        # 64 + 1 + nc
 
-        # Attributes the Ultralytics loss looks for --------------------- #
-        self.stride = torch.tensor(strides)
-        self.no = self.reg_max * 4 + self.nc  # 64 + (nc1+nc2)
-
-    # ------------------------------------------------------------------ #
-    # Internal helpers
-    # ------------------------------------------------------------------ #
+    # helpers
     @property
     def reg_dim(self):
-        return self.reg_max * 4  # 64 for YOLOv8
+        """64 for YOLOv8 (4 × reg_max)."""
+        return self.reg_max * 4
 
-    # ----------------------- feature‑map branch ------------------------ #
-    def _merge_feature_maps(self, maps1, maps2):
-        merged_levels = []
-        for f1, f2 in zip(maps1, maps2):
+    # ------------------------------------------------------------------ FM #
+    def _merge_feature_maps(self, fm1, fm2):
+        """
+        Handles the *training* path where each head returns raw FPN feature
+        maps (a  list of 3 tensors, one per pyramid level).
+        """
+        merged = []
+        for f1, f2 in zip(fm1, fm2):
             b, c1, h, w = f1.shape
-            b2, c2, _, _ = f2.shape
-            assert b == b2 and h == f2.shape[2] and w == f2.shape[3]
+            _, c2, _, _ = f2.shape
 
-            vec1 = self.reg_dim + self.nc1
-            vec2 = self.reg_dim + self.nc2
-            a1 = c1 // vec1
-            a2 = c2 // vec2
-            assert a1 == a2, "Anchor mismatch between heads"
-            anchors = a1
+            # infer anchor count
+            vec1 = self.reg_dim + 1 + max(self.nc1, 0)
+            vec2 = self.reg_dim + 1 + max(self.nc2, 0)
+            a1   = c1 // vec1
+            a2   = c2 // vec2
+            assert a1 == a2 and a1 > 0, "Anchor-count mismatch"
 
-            # reshape (B, A, vector, H, W)
-            f1 = f1.view(b, anchors, vec1, h, w)
-            f2 = f2.view(b, anchors, vec2, h, w)
+            f1 = f1.view(b, a1, vec1, h, w)
+            f2 = f2.view(b, a2, vec2, h, w)
 
-            # 1) Box‑distribution – take ONLY from head‑1 to keep 64 chan
-            reg = f1[:, :, : self.reg_dim]
+            # 64 DFL box channels
+            box_cat = torch.cat([f1[:, :, : self.reg_dim],
+                                 f2[:, :, : self.reg_dim]], dim=2)
 
-            # 2) Class logits – concat head‑1 then head‑2
-            cls = torch.cat([
-                f1[:, :, self.reg_dim :],
-                f2[:, :, self.reg_dim :]
-            ], dim=2)
+            # 1 objectness
+            obj_cat = torch.cat([f1[:, :, self.reg_dim : self.reg_dim + 1],
+                                 f2[:, :, self.reg_dim : self.reg_dim + 1]],
+                                dim=2)
 
-            merged = torch.cat([reg, cls], dim=2).view(
-                b, anchors * self.no, h, w
+            # class logits (either slice may be empty)
+            cls_cat = torch.cat(
+                [f1[:, :, self.reg_dim + 1 :],
+                 f2[:, :, self.reg_dim + 1 :]],
+                dim=2
             )
-            merged_levels.append(merged)
-        return merged_levels
 
-    # ----------------------- prediction branch ------------------------- #
-    def _merge_preds_aligned(self, p1, p2):
-        b, _, n1 = p1.shape
-        _, _, n2 = p2.shape
+            merged_vec = torch.cat([box_cat, obj_cat, cls_cat], dim=2)
+            merged.append(merged_vec.view(b, a1 * self.no, h, w))
+        return merged
+
+    # ------------------------------------------------------------- preds #
+    def _merge_preds(self, p1, p2):
+        """
+        Handles the *inference* / *export* path where each head returns a
+        single tensor shaped (B, C, N) or a tuple(preds, feat).
+        """
+        b, c1, n1 = p1.shape
+        _, c2, n2 = p2.shape
         device, dtype = p1.device, p1.dtype
 
-        # 1) Boxes – only from head‑1
-        boxes = p1[:, : self.reg_dim, :]
+        cls1 = max(c1 - self.reg_dim - 1, 0)
+        cls2 = max(c2 - self.reg_dim - 1, 0)
 
-        # 2) Class logits – zeros tensor then fill slices
-        cls = torch.zeros((b, self.nc, n1 + n2), device=device, dtype=dtype)
-        cls[:, : self.nc1, : n1] = p1[:, self.reg_dim :, :]
-        cls[:, self.nc1 :, n1 :] = p2[:, self.reg_dim :, :]
+        # 64 box + 1 obj
+        box_obj = torch.cat(
+            [p1[:, : self.reg_dim + 1, :],
+             p2[:, : self.reg_dim + 1, :]],
+            dim=2)
 
-        return torch.cat([boxes, cls], dim=1)
+        # class logits
+        cls = torch.zeros((b, cls1 + cls2, n1 + n2),
+                          device=device, dtype=dtype)
+        if cls1:
+            cls[:, : cls1, : n1] = p1[:, self.reg_dim + 1 :, :]
+        if cls2:
+            cls[:, cls1 :, n1 :] = p2[:, self.reg_dim + 1 :, :]
 
-    # ------------------------------------------------------------------ #
-    # Forward
+        return torch.cat([box_obj, cls], dim=1)
+
     # ------------------------------------------------------------------ #
     def forward(self, x):
         x1, x2 = x
-
-        if isinstance(x1, list):
+        if isinstance(x1, list):                           # training
             return self._merge_feature_maps(x1, x2)
-
-        if isinstance(x1, tuple):
-            preds = self._merge_preds_aligned(x1[0], x2[0])
-            return preds, x1[1]
-
-        return self._merge_preds_aligned(x1, x2)
+        if isinstance(x1, tuple):                          # export
+            return (self._merge_preds(x1[0], x2[0]), x1[1])
+        return self._merge_preds(x1, x2)                   # inference
