@@ -73,14 +73,6 @@ class Detect(nn.Module):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
         
         
-        print("Detect head output shape:", x[i].shape)
-        print("y shape:", y.shape)
-        print("if export:", self.export)
-        if self.export:
-            print("the shape is y")
-        else:
-            print("the shape is (y, x)")
-        
         if self.training:  # Training path
             return x
         
@@ -90,6 +82,16 @@ class Detect(nn.Module):
         # Inference mode (used by ConcatHead and eval)
         y = [x[i].view(x[i].shape[0], self.no, -1) for i in range(self.nl)]
         y = torch.cat(y, dim=2)  # [B, no, N]
+        
+        
+        print("Detect head output shape:", x[i].shape)
+        print("y shape:", y.shape)
+        print("if export:", self.export)
+        if self.export:
+            print("the shape is y")
+        else:
+            print("the shape is (y, x)")
+            
         return y, x  # tuple as expected by ConcatHead
 
     def forward_end2end(self, x):
