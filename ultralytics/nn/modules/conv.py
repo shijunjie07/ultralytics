@@ -493,6 +493,11 @@ class ConcatHead(nn.Module):
         
         print('reg_max: {}'.format(self.reg_max))
         print('self.reg_dim: {}'.format(self.reg_dim))
+        
+        print("\np1: {}".format(p1))
+        print("\np2: {}".format(p2))
+        print("\ncls: {}".format(cls))
+        
         cls[:, : self.nc1, : n1] = p1[:, self.reg_dim :, :]
         cls[:, self.nc1 :, n1 :] = p2[:, self.reg_dim :, :]
 
