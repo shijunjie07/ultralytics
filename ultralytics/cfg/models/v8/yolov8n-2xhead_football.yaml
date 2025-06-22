@@ -52,4 +52,4 @@ head:
   - [[15, 18, 21], 1, Detect, [1]] # Detect(P3, P4, P5) #23 new classes
 
   # ConcatHead takes in layer 22 and 23 and concatenates the output.
-  - [[22, 23], 1, ConcatHead, [2]] # Concat #22 and #23
+  - [[22, 23], 1, ConcatHead, [1, 1]] # Concat #22 and #23
