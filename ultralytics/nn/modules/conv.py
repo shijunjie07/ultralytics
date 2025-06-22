@@ -522,6 +522,15 @@ class ConcatHead(nn.Module):
         if isinstance(x1, tuple):
             print('1st element of x1 is a tuple')
             preds = self._merge_preds_aligned(x1[0], x2[0])
+            
+            print("DEBUG - type x1[1]:", type(x1[1]))
+            print("DEBUG - type x2[1]:", type(x2[1]))
+            print("DEBUG - type x1[1][0]:", type(x1[1][0]))
+            print("DEBUG - x1[1][0].shape:", x1[1][0].shape)
+            features = x1[1] + x2[1]
+            print("DEBUG - len(features):", len(features))
+            print("DEBUG - features[0].shape:", features[0].shape)
+            print("DEBUG - features[1].shape:", features[1].shape)
             return preds, x1[1] + x2[1]
         print('1st element of x1 is a tensor')
         return self._merge_preds_aligned(x1, x2)
