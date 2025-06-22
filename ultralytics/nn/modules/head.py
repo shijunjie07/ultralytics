@@ -76,6 +76,11 @@ class Detect(nn.Module):
         y = self._inference(x)
         
         print("Detect head output shape:", x[i].shape)
+        print("if export:", self.export)
+        if self.export:
+            print("the shape is y")
+        else:
+            print("the shape is (y, x)")
 
         return y if self.export else (y, x)
 
