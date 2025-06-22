@@ -487,6 +487,11 @@ class ConcatHead(nn.Module):
 
         # 2) Class logits – zeros tensor then fill slices
         cls = torch.zeros((b, self.nc, n1 + n2), device=device, dtype=dtype)
+        print("p1: {} p2: {} cls: {} n1: {} n2: {}".format(
+            p1.shape, p2.shape, cls.shape, n1, n2)
+        )
+        
+        print('self.reg_dim: {}'.format(self.reg_dim))
         cls[:, : self.nc1, : n1] = p1[:, self.reg_dim :, :]
         cls[:, self.nc1 :, n1 :] = p2[:, self.reg_dim :, :]
 
