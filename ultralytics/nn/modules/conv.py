@@ -515,7 +515,7 @@ class ConcatHead(nn.Module):
 
         if isinstance(x1, tuple):
             print('1st element of x1 is a tuple')
-            preds = self._merge_preds_aligned(x1[0], x2[0])
+            preds = self._merge_preds_aligned(x1, x2)
             return preds, x1[1]
         print('1st element of x1 is a tensor')
         return self._merge_preds_aligned(x1, x2)
