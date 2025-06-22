@@ -507,6 +507,7 @@ class ConcatHead(nn.Module):
 
         print("\nboxes: {}".format(boxes.shape))
         print("\ncls: {}".format(cls.shape))
+        print('\ncat: {}'.format(torch.cat([boxes, cls], dim=1).shape))
         return torch.cat([boxes, cls], dim=1)
 
     # ------------------------------------------------------------------ #
@@ -524,4 +525,3 @@ class ConcatHead(nn.Module):
             return preds, x1[1]
         print('1st element of x1 is a tensor')
         return self._merge_preds_aligned(x1, x2)
-
