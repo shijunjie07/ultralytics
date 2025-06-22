@@ -336,12 +336,22 @@ class Concat(nn.Module):
 class ConcatHead(nn.Module):
     """Concatenaion layer for Detect heads."""
 
-    def __init__(self, nc1=80, nc2=1, ch=()):
-        """Initializes the ConcatHead."""
-        super().__init__()
-        self.nc1 = nc1  # number of classes of head 1
-        self.nc2 = nc2  # number of classes of head 2
+    # def __init__(self, nc1=80, nc2=1, ch=()):
+    #     """Initializes the ConcatHead."""
+    #     super().__init__()
+    #     self.nc1 = nc1  # number of classes of head 1
+    #     self.nc2 = nc2  # number of classes of head 2
 
+    def __init__(self, nc1=1, nc2=1, ch=(), strides=(8, 16, 32), reg_max=16):
+        super().__init__()
+        self.nc1 = nc1
+        self.nc2 = nc2
+        self.nc  = nc1 + nc2
+
+        # >>> attributes the loss expects
+        self.stride  = torch.tensor(strides)
+        self.reg_max = reg_max
+        
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
 
