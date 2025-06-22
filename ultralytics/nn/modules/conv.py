@@ -501,7 +501,8 @@ class ConcatHead(nn.Module):
         
         cls[:, : self.nc1, : n1] = p1[:, self.reg_dim :, :]
         cls[:, self.nc1 :, n1 :] = p2[:, self.reg_dim :, :]
-
+        print("\nboxes: {}".format(boxes.shape))
+        print("\ncls: {}".format(cls.shape))
         return torch.cat([boxes, cls], dim=1)
 
     # ------------------------------------------------------------------ #
