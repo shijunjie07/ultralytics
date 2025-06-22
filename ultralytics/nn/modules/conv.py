@@ -482,8 +482,8 @@ class ConcatHead(nn.Module):
         _, _, n2 = p2.shape
         device, dtype = p1.device, p1.dtype
 
-        # 1) Boxes – only from head‑1
-        boxes = p1[:, : self.reg_dim, :]
+        # # 1) Boxes – only from head‑1
+        # boxes = p1[:, : self.reg_dim, :]
 
         # 2) Class logits – zeros tensor then fill slices
         cls = torch.zeros((b, self.nc, n1 + n2), device=device, dtype=dtype)
@@ -522,6 +522,6 @@ class ConcatHead(nn.Module):
         if isinstance(x1, tuple):
             print('1st element of x1 is a tuple')
             preds = self._merge_preds_aligned(x1[0], x2[0])
-            return preds, x1[1]
+            return preds, x1[1] + x[2]
         print('1st element of x1 is a tensor')
         return self._merge_preds_aligned(x1, x2)
