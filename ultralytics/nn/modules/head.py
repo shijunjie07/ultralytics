@@ -62,6 +62,10 @@ class Detect(nn.Module):
 
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
+        
+        print("cv2 output:", self.cv2[0](x[0]).shape)
+        print("cv3 output:", self.cv3[0](x[0]).shape)
+        
         if self.end2end:
             return self.forward_end2end(x)
 
@@ -70,6 +74,9 @@ class Detect(nn.Module):
         if self.training:  # Training path
             return x
         y = self._inference(x)
+        
+        print("Detect head output shape:", x[i].shape)
+
         return y if self.export else (y, x)
 
     def forward_end2end(self, x):
